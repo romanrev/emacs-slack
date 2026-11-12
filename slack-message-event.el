@@ -150,7 +150,16 @@
                               (slack-message-sender-name message team))
                :category 'slack))))
 
-(cl-defmethod slack-event-notify ((_this slack-message-replied-event) _message _team))
+(cl-defmethod slack-event-notify ((this slack-message-replied-event) _message team)
+  ;; `message_replied' stores the actual reply separately from the parent
+  ;; message used to update the room's thread metadata.
+  (let* ((payload (oref this payload))
+         (reply-payload (plist-get payload :message))
+         (channel (plist-get payload :channel))
+         (room (slack-room-find channel team))
+         (reply (and room (slack-message-create reply-payload team room))))
+    (when reply
+      (slack-message-notify reply room team))))
 
 (cl-defmethod slack-message-event-update-modeline ((_this slack-message-event) message team)
   (slack-if-let* ((room (slack-room-find message team)))
@@ -179,6 +188,14 @@
                      (next-count (+ count 1)))
                 (slack-room-set-mention-count room next-count team)))))
         (slack-update-modeline))))
+
+(cl-defmethod slack-message-event-update-modeline
+    ((this slack-message-replied-event) parent team)
+  (let* ((payload (oref this payload))
+         (reply-payload (plist-get payload :message))
+         (room (slack-room-find (plist-get payload :channel) team))
+         (reply (and room (slack-message-create reply-payload team room))))
+    (cl-call-next-method (or reply parent) team)))
 
 (cl-defmethod slack-message-event-update-modeline ((_this slack-message-changed-event) _message _team)
   (slack-update-modeline))
