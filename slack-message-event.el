@@ -29,6 +29,8 @@
 (require 'slack-event)
 (require 'slack-create-message)
 (require 'slack-message-buffer)
+(require 'slack-conversations)
+(require 'slack-counts)
 
 (defvar slack-alert-icon)
 
@@ -150,16 +152,19 @@
                               (slack-message-sender-name message team))
                :category 'slack))))
 
-(cl-defmethod slack-event-notify ((this slack-message-replied-event) _message team)
-  ;; `message_replied' stores the actual reply separately from the parent
-  ;; message used to update the room's thread metadata.
-  (let* ((payload (oref this payload))
+(defun slack-message-event-notify-reply (event team)
+  "Notify about the reply carried by EVENT, never its thread root."
+  (let* ((payload (oref event payload))
          (reply-payload (plist-get payload :message))
          (channel (plist-get payload :channel))
          (room (slack-room-find channel team))
          (reply (and room (slack-message-create reply-payload team room))))
-    (when reply
+    (when (and reply
+               (not (slack-message-minep reply team)))
       (slack-message-notify reply room team))))
+
+(cl-defmethod slack-event-notify ((this slack-message-replied-event) _message team)
+  (slack-message-event-notify-reply this team))
 
 (cl-defmethod slack-message-event-update-modeline ((_this slack-message-event) message team)
   (slack-if-let* ((room (slack-room-find message team)))
@@ -175,8 +180,10 @@
             ;; self and the buffer is not currently focused. For other
             ;; room types, preserve existing behavior.
             (if (slack-mpim-p room)
-                (when (and not-self (not focused))
-                  (slack-room-set-has-unreads room t team))
+                (progn
+                  (slack-message-event--ensure-mpim-count message room team)
+                  (when (and not-self (not focused))
+                    (slack-room-set-has-unreads room t team)))
               (slack-room-set-has-unreads room t team))
 
             ;; Increment mention count if explicitly mentioned, or for
@@ -202,8 +209,44 @@
 (cl-defmethod slack-message-event-update-modeline ((_this slack-message-deleted-event) _message _team)
   (slack-update-modeline))
 
+(defun slack-message-event-ai-complete-p (event)
+  "Return non-nil when EVENT carries a completed Slack AI response."
+  (let* ((payload (oref event payload))
+         (message (plist-get payload :message))
+         (context (plist-get message :ai_context)))
+    (equal "complete" (plist-get context :result_status))))
+
+(defvar slack-message-event-notified-ai-responses
+  (make-hash-table :test #'equal)
+  "AI response identities already sent as notifications this session.")
+
+(defun slack-message-event-ai-notification-key (message team)
+  "Return the stable identity for MESSAGE's AI response in TEAM."
+  (list (and (slot-boundp team 'id) (oref team id))
+        (oref message channel)
+        (slack-ts message)))
+
+(cl-defmethod slack-event-notify
+    ((this slack-message-changed-event) message team)
+  ;; Slackbot streams one AI reply through repeated message_changed events.
+  ;; Notify only when the final response is available, not for each partial
+  ;; update (the initial `ai' event already announces "Thinking...").
+  (when (slack-message-event-ai-complete-p this)
+    (slack-if-let* ((room (slack-room-find message team)))
+        (let ((key (slack-message-event-ai-notification-key message team)))
+          (unless (gethash key slack-message-event-notified-ai-responses)
+            (puthash key t slack-message-event-notified-ai-responses)
+            (slack-message-notify message room team))))))
+
 (cl-defmethod slack-event-update-ui ((this slack-message-event) message team)
-  (cl-call-next-method)
+  ;; Some Slack websocket deliveries expose `message_replied' as a generic
+  ;; message event even though their primary message is the thread root. Do
+  ;; not let generic dispatch notify that root.
+  (slack-event-update-buffer this message team)
+  (if (equal "message_replied"
+             (plist-get (oref this payload) :subtype))
+      (slack-message-event-notify-reply this team)
+    (slack-event-notify this message team))
   (slack-message-event-update-modeline this message team))
 
 (cl-defmethod slack-message-event-retrieve-users ((this slack-bot-message-event) _message team cb)
@@ -222,13 +265,29 @@
                                  :after-success cb)
       (funcall cb))))
 
+(defun slack-message-event--ensure-mpim-count (message room team)
+  "Add a local unread-count entry for a newly discovered MPIM."
+  (when (and (slack-mpim-p room)
+             (oref team counts))
+    (let ((counts (oref team counts)))
+      (unless (slack-counts-find (oref counts mpims) (oref room id))
+        (oset counts mpims
+              (cons (make-instance 'slack-counts-conversation
+                                   :id (oref room id)
+                                   :latest (slack-ts message))
+                    (oref counts mpims)))))))
+
 (cl-defmethod slack-event-update ((this slack-message-event) team)
   (let* ((message (slack-event-find-message this team)))
     (when message
-      (slack-event-save-message this message team)
-      (cl-labels
-          ((update () (slack-event-update-ui this message team)))
-        (slack-message-event-retrieve-users this message team #'update)))))
+      (slack-room-find-or-fetch
+       (oref message channel)
+       team
+       (lambda (_room)
+         (slack-event-save-message this message team)
+         (cl-labels
+             ((update () (slack-event-update-ui this message team)))
+           (slack-message-event-retrieve-users this message team #'update)))))))
 
 (provide 'slack-message-event)
 ;;; slack-message-event.el ends here
