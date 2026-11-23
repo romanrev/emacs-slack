@@ -85,6 +85,8 @@
                                             (slack-get-ts)))))
 
 (cl-defmethod slack-buffer-reaction-help-text ((this slack-room-buffer) reaction)
+  ;; the returned text is what the `help-echo' machinery displays, and
+  ;; `slack-reaction-help-text' builds it without firing requests
   (slack-reaction-help-text reaction (slack-buffer-team this)))
 
 (cl-defmethod slack-buffer-delete-message ((this slack-room-buffer) ts)

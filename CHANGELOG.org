@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 
 ** Fixed
 
+- Redrawing a visible message buffer no longer moves point to the
+  beginning of the buffer.  ~slack-buffer-redraw~ deletes the drawn
+  history and renders it again, which dragged point to =point-min=;
+  background redraws (a lazy user fetch completing while you scroll,
+  for instance) made the cursor jump to the top.  It now restores the
+  message under the cursor, or the cursor's position relative to the
+  prompt when it was in the input area.
+- Reaction tooltips work again in room buffers.  Hovering a reaction
+  signaled =wrong-number-of-arguments= on every hover, because
+  ~slack-buffer-reaction-help-text~ called ~slack-reaction-help-text~
+  without the callback argument it requires, so no tooltip ever showed
+  who reacted.
 - Profile-image fallbacks now honor the requested avatar size when SVG support
   is unavailable, instead of rendering the original full-size image.
 - Mentions are detected using the rendered full display name and raw Slack user
@@ -131,6 +143,16 @@ All notable changes to this project will be documented in this file.
 
 ** Changed
 
+- Showing who reacted no longer fires network requests.
+  ~slack-reaction-help-text~ used to look the reaction's users up one
+  by one through ~slack-user--find~, whose cache misses each trigger a
+  =users.info= request whose completion redraws every visible buffer
+  (that redraw storm also made the cursor jump while scrolling).
+  Reaction help text is now built from the team user cache only; when
+  some users are not loaded yet, it says so and suggests waiting a few
+  seconds — other lookups fill the cache as they complete — or running
+  ~slack-user-list-update~ to load the workspace users.  The unused
+  ~slack-reaction-fetch-users~ method is gone.
 - Typing =@= or =#= in a room, thread or edit buffer opens the mention
   picker by default; users no longer need to bind the keys themselves.
   The picker only opens at the start of a word: inside a word (=c#=, an
